@@ -41,12 +41,15 @@ class Gcode(object) :
 		# Reset data type
 		self.dataType = 0x1080
 		
+		# Assume it's not a layer command.
+		self.layerNum = None
+
 		# Reset parsed
 		self.parsed = False
 	
 		# Clear empty
-		self.empty = False
-		
+		self.empty = False    # Uh whut?
+
 		# Clear parameter values
 		for i in xrange(16) :
 			self.parameterValue[i] = ""
@@ -57,21 +60,26 @@ class Gcode(object) :
 		# Set original command
 		self.originalCommand = line
 		
-		# Remove leading white space
-		while len(line) > 0 and (line[0] == ' ' or line[0] == '\t' or line[0] == '\r' or line[0] == '\n') :
-			line = line[1 :]
-		
+		# Ditch any comment...
+		commentStart = line.find(';')
+
+		if commentStart >= 0:
+			# Remember if this mentions a layer number...
+			if line[commentStart:].startsWith(';LAYER:'):
+				self.layerNum = int(line[commentStart + 7:])
+
+			# ...and then ditch the comment.
+			line = line[:commentStart]
+
+		# ...then ditch leading and trailing whitespace...
+		line = line.strip()
+
+		# ...then ditch empty lines.
+		if not line:
+			return False
+
 		# Check if line is a host command
-		if len(line) > 0 and line[0] == '@' :
-		
-			# Remove trailing comment if it exists
-			if line.find(";") != -1 :
-				line = line[: line.find(";")]
-			
-			# Remove trailing white space
-			while len(line) > 0 and (line[-1] == ' ' or line[-1] == '\t' or line[-1] == '\r' or line[-1] == '\n') :
-				line = line[: -1]
-		
+		if line[0] == '@' :
 			# Set host command
 			self.hostCommand = line
 			
@@ -1209,3 +1217,17 @@ class Gcode(object) :
 
 		# Return if empty is set
 		return self.empty
+
+	# Is this a specific G command?
+	def isG(self, cmd):
+		return (self.hasValue('G') and
+			    (int(self.getValue('G')) == cmd))
+
+	# Is this a G0 or a G1?
+	def isG0orG1(self):
+		return (self.isG(0) or self.isG(1))
+
+	# Is this a specific M command?
+	def isM(self, cmd):
+		return (self.hasValue('M') and
+			    (int(self.getValue('M')) == cmd))

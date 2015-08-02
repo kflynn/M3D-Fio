@@ -1021,6 +1021,94 @@ class M3DFioPlugin(
 				bytes = struct.pack('4B', *data)
 				self._settings.set_float(["BedHeightOffset"], round(struct.unpack('f', bytes)[0], 6))
 	
+	def logInfo(self, msg):
+		self._logger.info(msg)
+
+	def logError(self, msg):
+		self._logger.error(msg)
+
+	def setProgress(self, pct):
+		self.logInfo("setProgress: %s" % pct)
+
+		self._plugin_manager.send_plugin_message(self._identifier, {
+			"value": "Progress bar percent",
+			"percent": pct
+		})
+
+	def setText(self, text):
+		self.logInfo("setText: %s" % text)
+
+		self._plugin_manager.send_plugin_message(self._identifier, {
+			"value": "Progress bar text",
+			"text": text
+		})	
+
+	def boolSetting(self, key):
+		return self._settings.get_boolean(["UseValidationPreprocessor"])
+
+	def shouldRun(self, key):
+		return self.boolSetting("Use" + key)
+
+	def fail(self, failureReason):	
+		# Check if processing a slice
+		if self.processingSlice:
+			# Clear processing slice
+			self.processingSlice = False
+		
+			# Set progress bar percent and text
+			self.setProgress("0")
+			
+			# Create error message
+			self._plugin_manager.send_plugin_message(self._identifier, {
+				"value": "Create error message",
+				"title": "Slicing failed", 
+				"text": "Could not slice the file. %s" % failureReason
+			})
+		else:	# not slicing
+			# Set error message
+			self._plugin_manager.send_plugin_message(self._identifier, {
+				"value": "Set error message",
+				"text": "Could not upload the file. %s" % failureReason
+			})
+
+	def loadAndParseFile(self, iterable):
+		self.setText("Parsing GCode for M3D")
+		self.gCodeArray = []
+		self.gCodePreamble = []
+		self.gCodeAppendix = []
+
+		textLineCount = 0
+		gCodeLineCount = 0
+
+		for line in iterable:
+			textLineCount += 1
+
+			# Ditch any comment...
+			commentStart = line.find(';')
+
+			if commentStart >= 0:
+				line = line[:commentStart]
+
+			# ...then ditch leading and trailing whitespace...
+			line = line.strip()
+
+			# ...then skip blank lines.
+			if not line:
+				continue
+
+			# OK, so far so good.  Parse.
+			gcode = Gcode()
+
+			if gcode.parseLine(line):
+				self.gCodeArray.append(gcode)
+				gCodeLineCount += 1
+
+		self.logInfo("Parsed %d line%s of text, %d line%s of GCode" % (
+					 textLineCount, "" if (textLineCount == 1) else "s",
+					 gCodeLineCount, "" if (gCodeLineCount == 1) else "s"))
+
+		return (gCodeLineCount > 0)
+
 	# Pre-process G-code
 	def preprocessesGcode(self, path, file_object, links = None, printer_profile = None, allow_overwrite = True, *args, **kwargs) :
 	
@@ -1033,49 +1121,27 @@ class M3DFioPlugin(
 
 			# Return unmodified file
 			return file_object
-		
-		# Create temporary file
-		fd, temp = tempfile.mkstemp()
-		
-		# Copy file to temporary file
-		for line in file_object.stream() :
-			os.write(fd, line)
-		os.close(fd)
+
+		# Load the GCode
+		if not self.loadAndParseFile(file_object.stream().read().split("\n")):
+			self.fail("The GCode in the file could not be parsed.")
+			return False
 		
 		# Set progress bar percent
-		self._plugin_manager.send_plugin_message(self._identifier, dict(value = "Progress bar percent", percent = "60"))
+		self.setProgress("60")
 		
 		# Use center model pre-processor if set
-		if self._settings.get_boolean(["UseCenterModelPreprocessor"]) == True :
-			self._plugin_manager.send_plugin_message(self._identifier, dict(value = "Progress bar text", text = "Centering model ..."))
-			self.centerModelPreprocessor(temp)
+		if self.shouldRun("CenterModelPreprocessor"):
+			self.setText("Centering model ...")
+			self.centerModelPreprocessor()
 		
 		# Set progress bar percent
-		self._plugin_manager.send_plugin_message(self._identifier, dict(value = "Progress bar percent", percent = "64"))
-		self._plugin_manager.send_plugin_message(self._identifier, dict(value = "Progress bar text", text = "Checking Dimensions ..."))
+		self.setProgress("64")
+		self.setText("Checking Dimensions ...")
 		
 		# Check if print is out of bounds
-		if self.getPrintInformation(temp) == False :
-		
-			# Check if processing a slice
-			if self.processingSlice == True :
-			
-				# Clear processing slice
-				self.processingSlice = False
-			
-				# Set progress bar percent and text
-				self._plugin_manager.send_plugin_message(self._identifier, dict(value = "Progress bar percent", percent = "0"))
-				
-				# Create error message
-				self._plugin_manager.send_plugin_message(self._identifier, dict(value = "Create error message", title = "Slicing failed", text = "Could not slice the file. The dimensions of the model go outside the bounds of the printer."))
-			
-			# Otherwise
-			else :
-		
-				# Set error message
-				self._plugin_manager.send_plugin_message(self._identifier, dict(value = "Set error message", text = "Could not upload the file. The dimensions of the model go outside the bounds of the printer."))
-			
-			# Return false
+		if self.getPrintInformation() == False :
+			self.fail("The dimensions of the model go outside the bounds of the printer.")
 			return False
 		
 		# Set values
@@ -1091,75 +1157,91 @@ class M3DFioPlugin(
 		self.filamentType = str(self._settings.get(["FilamentType"]))
 		
 		# Set progress bar percent
-		self._plugin_manager.send_plugin_message(self._identifier, dict(value = "Progress bar percent", percent = "68"))
+		self.setProgress("68")
 		
 		# Use validation pre-processor if set
-		if self._settings.get_boolean(["UseValidationPreprocessor"]) == True :
-			self._plugin_manager.send_plugin_message(self._identifier, dict(value = "Progress bar text", text = "Validation ..."))
-			self.validationPreprocessor(temp)
+		if self.shouldRun("ValidationPreprocessor"):
+			self.setText("Validation ...")
+			self.validationPreprocessor()
 		
 		# Set progress bar percent
-		self._plugin_manager.send_plugin_message(self._identifier, dict(value = "Progress bar percent", percent = "72"))
+		self.setProgress("72")
 		
 		# Use preparation pre-processor if set
-		if self._settings.get_boolean(["UsePreparationPreprocessor"]) == True :
-			self._plugin_manager.send_plugin_message(self._identifier, dict(value = "Progress bar text", text = "Preparation ..."))
-			self.preparationPreprocessor(temp)
+		if self.shouldRun("PreparationPreprocessor"):
+			self.setText("Preparation ...")
+			self.preparationPreprocessor()
 		
 		# Set progress bar percent
-		self._plugin_manager.send_plugin_message(self._identifier, dict(value = "Progress bar percent", percent = "76"))
+		self.setProgress("76")
 		
-		# Use wave bonding pre-processor if set
-		if self._settings.get_boolean(["UseWaveBondingPreprocessor"]) == True :
-			self._plugin_manager.send_plugin_message(self._identifier, dict(value = "Progress bar text", text = "Wave Bonding ..."))
-			self.waveBondingPreprocessor(temp)
+		# # Use wave bonding pre-processor if set
+		# if self.shouldRun("WaveBondingPreprocessor"):
+		# 	self.setText("Wave Bonding ...")
+		# 	self.waveBondingPreprocessor()
 		
-		# Set progress bar percent
-		self._plugin_manager.send_plugin_message(self._identifier, dict(value = "Progress bar percent", percent = "80"))
+		# # Set progress bar percent
+		# self.setProgress("80")
 		
-		# Use thermal bonding pre-processor if set
-		if self._settings.get_boolean(["UseThermalBondingPreprocessor"]) == True :
-			self._plugin_manager.send_plugin_message(self._identifier, dict(value = "Progress bar text", text = "Thermal Bonding ..."))
-			self.thermalBondingPreprocessor(temp)
+		# # Use thermal bonding pre-processor if set
+		# if self.shouldRun("ThermalBondingPreprocessor"):
+		# 	self.setText("Thermal Bonding ...")
+		# 	self.thermalBondingPreprocessor()
 		
-		# Set progress bar percent
-		self._plugin_manager.send_plugin_message(self._identifier, dict(value = "Progress bar percent", percent = "85"))
+		# # Set progress bar percent
+		# self.setProgress("85")
 		
-		# Use bed compensation pre-processor if set
-		if self._settings.get_boolean(["UseBedCompensationPreprocessor"]) == True :
-			self._plugin_manager.send_plugin_message(self._identifier, dict(value = "Progress bar text", text = "Bed Compensation ..."))
-			self.bedCompensationPreprocessor(temp)
+		# # Use bed compensation pre-processor if set
+		# if self.shouldRun("BedCompensationPreprocessor"):
+		# 	self.setText("Bed Compensation ...")
+		# 	self.bedCompensationPreprocessor()
 		
-		# Set progress bar percent
-		self._plugin_manager.send_plugin_message(self._identifier, dict(value = "Progress bar percent", percent = "90"))
+		# # Set progress bar percent
+		# self.setProgress("90")
 		
-		# Use backlash compensation pre-processor if set
-		if self._settings.get_boolean(["UseBacklashCompensationPreprocessor"]) == True :
-			self._plugin_manager.send_plugin_message(self._identifier, dict(value = "Progress bar text", text = "Backlash Compensation ..."))
-			self.backlashCompensationPreprocessor(temp)
+		# # Use backlash compensation pre-processor if set
+		# if self.shouldRun("BacklashCompensationPreprocessor"):
+		# 	self.setText("Backlash Compensation ...")
+		# 	self.backlashCompensationPreprocessor()
 		
-		# Set progress bar percent
-		self._plugin_manager.send_plugin_message(self._identifier, dict(value = "Progress bar percent", percent = "95"))
+		# # Set progress bar percent
+		# self.setProgress("95")
 		
 		# Use feed rate conversion pre-processor if set
-		if self._settings.get_boolean(["UseFeedRateConversionPreprocessor"]) == True :
-			self._plugin_manager.send_plugin_message(self._identifier, dict(value = "Progress bar text", text = "Feed Rate Conversion ..."))
-			self.feedRateConversionPreprocessor(temp)
-		
+		if self.shouldRun("FeedRateConversionPreprocessor"):
+			self.setText("Feed Rate Conversion ...")
+			self.feedRateConversionPreprocessor()
+
 		# Set progress bar percent
-		self._plugin_manager.send_plugin_message(self._identifier, dict(value = "Progress bar percent", percent = "100"))
+		self.setProgress("98")
+
+		# Set progress bar percent
+		self.setProgress("100")		
+		self.setText("Writing M3D-ready file ...")
+
+		# Create temporary file
+		fd, temp = tempfile.mkstemp()
 		
+		output = os.fdopen(fd, "wu")
+
+		self.logInfo("Writing GCode for M3D to %s" % temp)
+
+		# Copy file to temporary file
+		for gCodeSet in [ self.gCodePreamble, self.gCodeArray, self.gCodeAppendix ]:
+			for gcode in gCodeSet:
+				output.write(gcode.getAscii())
+
+		output.close()
+
 		# Return processed G-code
 		return octoprint.filemanager.util.DiskFileWrapper(os.path.basename(temp), temp)
 	
 	# Center model pre-processor
-	def centerModelPreprocessor(self, file) :
-	
+	def centerModelPreprocessor(self):
 		# Initialize variables
 		localX = 54
 		localY = 60
 		relativeMode = False
-		gcode = Gcode()
 		
 		# Reset X and Y print values
 		self.maxXExtruder = 0
@@ -1167,103 +1249,66 @@ class M3DFioPlugin(
 		self.minXExtruder = sys.float_info.max
 		self.minYExtruder = sys.float_info.max
 		
-		# Read in file
-		for line in open(file) :
-
-			# Check if line was parsed successfully and it's a G command
-			gcode.clear()
-			if gcode.parseLine(line) == True and gcode.hasValue('G') == True :
+		for gcode in self.gCodeArray:
+			# Is this a G command?
+			if gcode.isG0orG1():
+				# Check if command has an X value
+				if gcode.hasValue('X'):
+					# Get X value of the command
+					commandX = float(gcode.getValue('X'))
+				
+					# Set local X
+					if relativeMode :
+						localX += commandX
+					else :
+						localX = commandX
+				
+				# Check if command has a Y value
+				if gcode.hasValue('Y'):
+					# Get Y value of the command
+					commandY = float(gcode.getValue('Y'))
+				
+					# Set local Y
+					if relativeMode :
+						localY += commandY
+					else :
+						localY = commandY
 			
-				# Check if command is G0 or G1
-				if gcode.getValue('G') == "0" or gcode.getValue('G') == "1" :
-				
-					# Check if command has an X value
-					if gcode.hasValue('X') == True :
-					
-						# Get X value of the command
-						commandX = float(gcode.getValue('X'))
-					
-						# Set local X
-						if relativeMode :
-							localX += commandX
-						else :
-							localX = commandX
-					
-					# Check if command has an Y value
-					if gcode.hasValue('Y') == True :
-					
-						# Get Y value of the command
-						commandY = float(gcode.getValue('Y'))
-					
-						# Set local Y
-						if relativeMode :
-							localY += commandY
-						else :
-							localY = commandY
-				
-					# Update minimums and maximums X and Y dimensions of extruder
-					self.minXExtruder = min(self.minXExtruder, localX)
-					self.maxXExtruder = max(self.maxXExtruder, localX)
-					self.minYExtruder = min(self.minYExtruder, localY)
-					self.maxYExtruder = max(self.maxYExtruder, localY)
-				
-				# Otherwise check if command is G90
-				elif gcode.getValue('G') == "90" :
-				
-					# Clear relative mode
-					relativeMode = False
-				
-				# Otherwise check if command is G91
-				elif gcode.getValue('G') == "91" :
-				
-					# Set relative mode
-					relativeMode = True
+				# Update minimums and maximums X and Y dimensions of extruder
+				self.minXExtruder = min(self.minXExtruder, localX)
+				self.maxXExtruder = max(self.maxXExtruder, localX)
+				self.minYExtruder = min(self.minYExtruder, localY)
+				self.maxYExtruder = max(self.maxYExtruder, localY)
+			
+			# Otherwise check if command is G90
+			elif gcode.isG(90):
+				# Clear relative mode
+				relativeMode = False
+			
+			# Otherwise check if command is G91
+			elif gcode.isG(91):
+				# Set relative mode
+				relativeMode = True
 	
-		# Move the input file to a temporary file
-		temp = tempfile.mkstemp()[1]
-		os.rename(file, temp)
-		
-		# Create ouput file in place of the input file
-		output = os.open(file, os.O_WRONLY | os.O_CREAT)
-		
 		# Calculate adjustments
 		displacementX = (max(self.bedLowMaxX, max(self.bedMediumMaxX, self.bedHighMaxX)) - self.maxXExtruder - self.minXExtruder + min(self.bedLowMinX, min(self.bedMediumMinX, self.bedHighMinX))) / 2
 		displacementY = (max(self.bedLowMaxY, max(self.bedMediumMaxY, self.bedHighMaxY)) - self.maxYExtruder - self.minYExtruder + min(self.bedLowMinY, min(self.bedMediumMinY, self.bedHighMinY))) / 2
 		
-		# Read in input file
-		for line in open(temp) :
-		
-			# Check if line was parsed successfully and it's G0 or G1
-			gcode.clear()
-			if gcode.parseLine(line) == True and gcode.hasValue('G') == True and (gcode.getValue('G') == "0" or gcode.getValue('G') == "1") :
-				
+		# Adjust GCode.
+		for gcode in self.gCodeArray:
+			if gcode.isG0orG1():
 				# Check if line contains an X value
 				if gcode.hasValue('X') == True :
-				
 					# Adjust X value
 					gcode.setValue('X', str(float(gcode.getValue('X')) + displacementX))
 				
 				# Check if line contains a Y value
-				if gcode.hasValue('Y') == True :
-				
+				if gcode.hasValue('Y') == True :		
 					# Adjust Y value
 					gcode.setValue('Y', str(float(gcode.getValue('Y')) + displacementY))
-				
-				# Set line to adjusted value
-				line = gcode.getAscii() + '\n'
-			
-			# Send line to output
-			os.write(output, line)
-		
-		# Close output file
-		os.close(output)
-		
-		# Remove temporary file
-		os.remove(temp)
 	
 	# Get print information
-	def getPrintInformation(self, file) :
-	
+	def getPrintInformation(self) :
 		# Initialize variables
 		localX = 54
 		localY = 60
@@ -1271,7 +1316,6 @@ class M3DFioPlugin(
 		localE = 0
 		relativeMode = False
 		tier = "Low"
-		gcode = Gcode()
 		
 		# Reset all print values
 		self.maxXModel = 0
@@ -1289,143 +1333,133 @@ class M3DFioPlugin(
 		self.minZExtruder = sys.float_info.max
 		self.minFeedRate = sys.float_info.max
 		
-		# Read in file
-		for line in open(file) :
-
-			# Check if line was parsed successfully and it's a G command
-			gcode.clear()
-			if gcode.parseLine(line) == True and gcode.hasValue('G') == True :
+		for gcode in self.gCodeArray:
+			if gcode.isG0orG1():
+				# Clear positive extruding
+				positiveExtrusion = False
 			
-				# Check if command is G0 or G1
-				if gcode.getValue('G') == "0" or gcode.getValue('G') == "1" :
+				# Check if command has an E value
+				if gcode.hasValue('E') == True :
+			
+					# Get E value of the command
+					commandE = float(gcode.getValue('E'))
 				
-					# Clear positive extruding
-					positiveExtrusion = False
+					# Set positive extrusion based on adjusted E value
+					if relativeMode == True :
+						positiveExtrusion = commandE > 0
+						localE += commandE
 				
-					# Check if command has an E value
-					if gcode.hasValue('E') == True :
+					else :
+						positiveExtrusion = commandE > localE
+						localE = commandE
+			
+				# Check if command has a F value
+				if gcode.hasValue('F') == True :
+			
+					# Get F value of the command
+					commandF = float(gcode.getValue('F'))
+			
+					# Update minimum and maximum feed rate values
+					self.minFeedRate = min(self.minFeedRate, commandF)
+					self.maxFeedRate = max(self.maxFeedRate, commandF)
+			
+				# Check if command has an X value
+				if gcode.hasValue('X') == True :
 				
-						# Get E value of the command
-						commandE = float(gcode.getValue('E'))
-					
-						# Set positive extrusion based on adjusted E value
-						if relativeMode == True :
-							positiveExtrusion = commandE > 0
-							localE += commandE
-					
-						else :
-							positiveExtrusion = commandE > localE
-							localE = commandE
+					# Get X value of the command
+					commandX = float(gcode.getValue('X'))
 				
-					# Check if command has a F value
-					if gcode.hasValue('F') == True :
+					# Set local X
+					if relativeMode :
+						localX += commandX
+					else :
+						localX = commandX
 				
-						# Get F value of the command
-						commandF = float(gcode.getValue('F'))
+				# Check if command has an Y value
+				if gcode.hasValue('Y') == True :
 				
-						# Update minimum and maximum feed rate values
-						self.minFeedRate = min(self.minFeedRate, commandF)
-						self.maxFeedRate = max(self.maxFeedRate, commandF)
+					# Get Y value of the command
+					commandY = float(gcode.getValue('Y'))
 				
-					# Check if command has an X value
-					if gcode.hasValue('X') == True :
-					
-						# Get X value of the command
-						commandX = float(gcode.getValue('X'))
-					
-						# Set local X
-						if relativeMode :
-							localX += commandX
-						else :
-							localX = commandX
-					
-					# Check if command has an Y value
-					if gcode.hasValue('Y') == True :
-					
-						# Get Y value of the command
-						commandY = float(gcode.getValue('Y'))
-					
-						# Set local Y
-						if relativeMode :
-							localY += commandY
-						else :
-							localY = commandY
+					# Set local Y
+					if relativeMode :
+						localY += commandY
+					else :
+						localY = commandY
+			
+				# Check if command has an Z value
+				if gcode.hasValue('Z') == True :
 				
-					# Check if command has an Z value
-					if gcode.hasValue('Z') == True :
+					# Get Z value of the command
+					commandZ = float(gcode.getValue('Z'))
+				
+					# Set local Z
+					if relativeMode :
+						localZ += commandZ
+					else :
+						localZ = commandZ
+				
+					# Check if Z is out of bounds
+					if localZ < self.bedLowMinZ or localZ > self.bedHighMaxZ :
 					
-						# Get Z value of the command
-						commandZ = float(gcode.getValue('Z'))
-					
-						# Set local Z
-						if relativeMode :
-							localZ += commandZ
-						else :
-							localZ = commandZ
-					
-						# Check if Z is out of bounds
-						if localZ < self.bedLowMinZ or localZ > self.bedHighMaxZ :
-						
-							# Return false
-							return False
-					
-						# Set print tier
-						if localZ >= self.bedLowMinZ and localZ < self.bedLowMaxZ :
-							tier = "Low"
-						
-						elif localZ >= self.bedMediumMinZ and localZ < self.bedMediumMaxZ :
-							tier = "Medium"
-						
-						elif localZ >= self.bedHighMinZ and localZ <= self.bedHighMaxZ :
-							tier = "High"
-					
-					# Return false if X or Y are out of bounds				
-					if tier == "Low" and (localX < self.bedLowMinX or localX > self.bedLowMaxX or localY < self.bedLowMinY or localY > self.bedLowMaxY) :
+						# Return false
 						return False
+				
+					# Set print tier
+					if localZ >= self.bedLowMinZ and localZ < self.bedLowMaxZ :
+						tier = "Low"
 					
-					elif tier == "Medium" and (localX < self.bedMediumMinX or localX > self.bedMediumMaxX or localY < self.bedMediumMinY or localY > self.bedMediumMaxY) :
-						return False
+					elif localZ >= self.bedMediumMinZ and localZ < self.bedMediumMaxZ :
+						tier = "Medium"
+					
+					elif localZ >= self.bedHighMinZ and localZ <= self.bedHighMaxZ :
+						tier = "High"
+				
+				# Return false if X or Y are out of bounds				
+				if tier == "Low" and (localX < self.bedLowMinX or localX > self.bedLowMaxX or localY < self.bedLowMinY or localY > self.bedLowMaxY) :
+					return False
+				
+				elif tier == "Medium" and (localX < self.bedMediumMinX or localX > self.bedMediumMaxX or localY < self.bedMediumMinY or localY > self.bedMediumMaxY) :
+					return False
 
-					elif tier == "High" and (localX < self.bedHighMinX or localX > self.bedHighMaxX or localY < self.bedHighMinY or localY > self.bedHighMaxY) :
-						return False
-					
-					# Check if positive extruding
-					if positiveExtrusion :
+				elif tier == "High" and (localX < self.bedHighMinX or localX > self.bedHighMaxX or localY < self.bedHighMinY or localY > self.bedHighMaxY) :
+					return False
 				
-						# Update minimums and maximums dimensions of the model
-						self.minXModel = min(self.minXModel, localX)
-						self.maxXModel = max(self.maxXModel, localX)
-						self.minYModel = min(self.minYModel, localY)
-						self.maxYModel = max(self.maxYModel, localY)
-						self.minZModel = min(self.minZModel, localZ)
-						self.maxZModel = max(self.maxZModel, localZ)
-				
-					# Update minimums and maximums dimensions of extruder
-					self.minXExtruder = min(self.minXExtruder, localX)
-					self.maxXExtruder = max(self.maxXExtruder, localX)
-					self.minYExtruder = min(self.minYExtruder, localY)
-					self.maxYExtruder = max(self.maxYExtruder, localY)
-					self.minZExtruder = min(self.minZExtruder, localZ)
-					self.maxZExtruder = max(self.maxZExtruder, localZ)
-				
-				# Otherwise check if command is G90
-				elif gcode.getValue('G') == "90" :
-				
-					# Clear relative mode
-					relativeMode = False
-				
-				# Otherwise check if command is G91
-				elif gcode.getValue('G') == "91" :
-				
-					# Set relative mode
-					relativeMode = True
+				# Check if positive extruding
+				if positiveExtrusion :
+			
+					# Update minimums and maximums dimensions of the model
+					self.minXModel = min(self.minXModel, localX)
+					self.maxXModel = max(self.maxXModel, localX)
+					self.minYModel = min(self.minYModel, localY)
+					self.maxYModel = max(self.maxYModel, localY)
+					self.minZModel = min(self.minZModel, localZ)
+					self.maxZModel = max(self.maxZModel, localZ)
+			
+				# Update minimums and maximums dimensions of extruder
+				self.minXExtruder = min(self.minXExtruder, localX)
+				self.maxXExtruder = max(self.maxXExtruder, localX)
+				self.minYExtruder = min(self.minYExtruder, localY)
+				self.maxYExtruder = max(self.maxYExtruder, localY)
+				self.minZExtruder = min(self.minZExtruder, localZ)
+				self.maxZExtruder = max(self.maxZExtruder, localZ)
+			
+			# Otherwise check if command is G90
+			elif gcode.isG(90):
+				# Clear relative mode
+				relativeMode = False
+			
+			# Otherwise check if command is G91
+			elif gcode.isG(91):
+				# Set relative mode
+				relativeMode = True
 		
 		# Return true
 		return True
 	
 	# Get bounded temperature
 	def getBoundedTemperature(self, value) :
-	
+
 		# Return temperature in bounded range
 		return min(max(value, 150), 285)
 	
@@ -1536,67 +1570,36 @@ class M3DFioPlugin(
 		return (right * valueY + self.frontRightOffset - (left * valueY + self.frontLeftOffset)) / self.levellingMoveX * valueX + (left * valueY + self.frontLeftOffset)
 	
 	# Validation pre-processor
-	def validationPreprocessor(self, file) :
-	
-		# Initialize variables
-		gcode = Gcode()
-	
-		# Move the input file to a temporary file
-		temp = tempfile.mkstemp()[1]
-		os.rename(file, temp)
+	def validationPreprocessor(self) :
+		# We have to do this with a while loop since we're likely going to
+		# modify the array as we walk it.
+
+		i = 0
+
+		while i < len(self.gCodeArray):
+			gcode = self.gCodeArray[i]
+
+			# Check if command isn't valid for the printer
+			if gcode.isM(82) or gcode.isM(83):
+				# Drop this
+				del(gcode[i])
+				continue
 		
-		# Create ouput file in place of the input file
-		output = os.open(file, os.O_WRONLY | os.O_CREAT)
-		
-		# Read in input file
-		for line in open(temp) :
-			
-			# Check if line contains valid G-code
-			gcode.clear()
-			if gcode.parseLine(line) == True :
-			
-				# Check if command isn't valid for the printer
-				if gcode.hasValue('M') == True and (gcode.getValue('M') == "82" or gcode.getValue('M') == "83") :
-			
-					# Get next line
-					continue
-			
-				# Check if command contains tool selection
-				if gcode.hasParameter('T') == True :
-			
-					# Remove tool selection
-					gcode.removeParameter('T')
-				
-				# Set line to adjusted value
-				line = gcode.getAscii() + '\n'
-			
-			# Send line to output
-			os.write(output, line)
-		
-		# Close output file
-		os.close(output)
-		
-		# Remove temporary file
-		os.remove(temp)
+			# Check if command contains tool selection
+			if gcode.hasParameter('T') == True :
+				# Remove tool selection
+				gcode.removeParameter('T')
+
+			i += 1
 	
 	# Preparation pre-processor
-	def preparationPreprocessor(self, file, cornerExcess = True) :
-	
+	def preparationPreprocessor(self, cornerExcess = True) :
 		# Initialize variables
-		gcode = Gcode()
 		cornerX = 0
 		cornerY = 0
-	
-		# Move the input file to a temporary file
-		temp = tempfile.mkstemp()[1]
-		os.rename(file, temp)
-		
-		# Create ouput file in place of the input file
-		output = os.open(file, os.O_WRONLY | os.O_CREAT)
-		
+
 		# Check if leaving excess at corner
 		if cornerExcess == True :
-		
 			# Set corner X
 			if self.maxXExtruder < self.bedLowMaxX :
 				cornerX = (self.bedLowMaxX - self.bedLowMinX) / 2
@@ -1611,72 +1614,60 @@ class M3DFioPlugin(
 		
 		# Add intro to output
 		if self.filamentType == "PLA" :
-			os.write(output, "M106 S255\n")
+			self.gCodePreamble.append(Gcode("M106 S255"))
 		else :
-			os.write(output, "M106 S50\n")
-		os.write(output, "M17\n")
-		os.write(output, "G90\n")
-		os.write(output, "M104 S" + str(self.filamentTemperature) + '\n')
-		os.write(output, "G0 Z5 F2900\n")
-		os.write(output, "G28\n")
+			self.gCodePreamble.append(Gcode("M106 S50"))
+		self.gCodePreamble.append(Gcode("M17"))
+		self.gCodePreamble.append(Gcode("G90"))
+		self.gCodePreamble.append(Gcode("M104 S" + str(self.filamentTemperature)))
+		self.gCodePreamble.append(Gcode("G0 Z5 F2900"))
+		self.gCodePreamble.append(Gcode("G28"))
 		
 		# Check if one of the corners wasn't set
 		if cornerX == 0 or cornerY == 0 :
-		
 			# Prepare extruder the standard way
-			os.write(output, "M18\n")
-			os.write(output, "M109 S" + str(self.filamentTemperature) + '\n')
-			os.write(output, "G4 S2\n")
-			os.write(output, "M17\n")
-			os.write(output, "G91\n")
+			self.gCodePreamble.append(Gcode("M18"))
+			self.gCodePreamble.append(Gcode("M109 S" + str(self.filamentTemperature)))
+			self.gCodePreamble.append(Gcode("G4 S2"))
+			self.gCodePreamble.append(Gcode("M17"))
+			self.gCodePreamble.append(Gcode("G91"))
 		
 		# Otherwise
 		else :
 		
 			# Prepare extruder by leaving excess at corner
-			os.write(output, "G91\n")
-			os.write(output, "G0 X" + str(-cornerX) + " Y" + str(-cornerY) + " F2900\n")
-			os.write(output, "M18\n")
-			os.write(output, "M109 S" + str(self.filamentTemperature) + '\n')
-			os.write(output, "M17\n")
-			os.write(output, "G0 Z-4 F2900\n")
-			os.write(output, "G0 E7.5 F2000\n")
-			os.write(output, "G4 S3\n")
-			os.write(output, "G0 X" + str(cornerX * 0.1) + " Y" + str(cornerY * 0.1) +" Z-0.999 F2900\n")
-			os.write(output, "G0 X" + str(cornerX * 0.9) + " Y" + str(cornerY * 0.9) +" F1000\n")
-		os.write(output, "G92 E0\n")
-		os.write(output, "G90\n")
-		os.write(output, "G0 Z0.4 F2400\n")
-		
-		# Read in input file
-		for line in open(temp) :
-			
-			# Send line to output
-			os.write(output, line)
+			self.gCodePreamble.append(Gcode("G91"))
+			self.gCodePreamble.append(Gcode("G0 X" + str(-cornerX) + " Y" + str(-cornerY) + " F2900"))
+			self.gCodePreamble.append(Gcode("M18"))
+			self.gCodePreamble.append(Gcode("M109 S" + str(self.filamentTemperature)))
+			self.gCodePreamble.append(Gcode("M17"))
+			self.gCodePreamble.append(Gcode("G0 Z-4 F2900"))
+			self.gCodePreamble.append(Gcode("G0 E7.5 F2000"))
+			self.gCodePreamble.append(Gcode("G4 S3"))
+			self.gCodePreamble.append(Gcode("G0 X" + str(cornerX * 0.1) + " Y" + str(cornerY * 0.1) +" Z-0.999 F2900"))
+			self.gCodePreamble.append(Gcode("G0 X" + str(cornerX * 0.9) + " Y" + str(cornerY * 0.9) +" F1000"))
+		self.gCodePreamble.append(Gcode("G92 E0"))
+		self.gCodePreamble.append(Gcode("G90"))
+		self.gCodePreamble.append(Gcode("G0 Z0.4 F2400"))
 		
 		# Add outro to output
-		os.write(output, "G91\n")
-		os.write(output, "G0 E-1 F2000\n")
-		os.write(output, "G0 X5 Y5 F2000\n")
-		os.write(output, "G0 E-8 F2000\n")
-		os.write(output, "M104 S0\n")
+		self.gCodeAppendix.append(Gcode("G91"))
+		self.gCodeAppendix.append(Gcode("G0 E-1 F2000"))
+		self.gCodeAppendix.append(Gcode("G0 X5 Y5 F2000"))
+		self.gCodeAppendix.append(Gcode("G0 E-8 F2000"))
+		self.gCodeAppendix.append(Gcode("M104 S0"))
 		if self.maxZExtruder > 60 :
 			if self.maxZExtruder < 110 :
-				os.write(output, "G0 Z3 F2900\n")
-			os.write(output, "G90\n")
-			os.write(output, "G0 X90 Y84\n")
+				self.gCodeAppendix.append(Gcode("G0 Z3 F2900"))
+			self.gCodeAppendix.append(Gcode("G90"))
+			self.gCodeAppendix.append(Gcode("G0 X90 Y84"))
 		else :
-			os.write(output, "G0 Z3 F2900\n")
-			os.write(output, "G90\n")
-			os.write(output, "G0 X95 Y95\n")
-		os.write(output, "M18\n")
-		os.write(output, "M107\n")
+			self.gCodeAppendix.append(Gcode("G0 Z3 F2900"))
+			self.gCodeAppendix.append(Gcode("G90"))
+			self.gCodeAppendix.append(Gcode("G0 X95 Y95"))
+		self.gCodeAppendix.append(Gcode("M18"))
+		self.gCodeAppendix.append(Gcode("M107"))
 		
-		# Close output file
-		os.close(output)
-		
-		# Remove temporary file
-		os.remove(temp)
 	
 	# Wave bonding pre-processor
 	def waveBondingPreprocessor(self, file) :
@@ -2044,7 +2035,7 @@ class M3DFioPlugin(
 					continue
 			
 				# Check if line is a G command and wave bonding isn't being used
-				if gcode.hasValue('G') == True and self._settings.get_boolean(["UseWaveBondingPreprocessor"]) != True :
+				if gcode.hasValue('G') == True and self.shouldRun("WaveBondingPreprocessor"):
 			
 					# Check if command is G0 or G1 and and it's in absolute
 					if (gcode.getValue('G') == "0" or gcode.getValue('G') == "1") and relativeMode == False :
@@ -2611,49 +2602,21 @@ class M3DFioPlugin(
 		os.remove(temp)
 	
 	# Feed rate conversion pre-processor
-	def feedRateConversionPreprocessor(self, file) :
-	
-		# Initialize variables
-		gcode = Gcode()
-	
-		# Move the input file to a temporary file
-		temp = tempfile.mkstemp()[1]
-		os.rename(file, temp)
-		
-		# Create ouput file in place of the input file
-		output = os.open(file, os.O_WRONLY | os.O_CREAT)
-		
-		# Read in input file
-		for line in open(temp) :
-			
-			# Check if line was parsed successfully and it contains G and F values
-			gcode.clear()
-			if gcode.parseLine(line) == True and gcode.hasValue('G') == True and gcode.hasValue('F') == True :
-			
+	def feedRateConversionPreprocessor(self, file):
+		for gcode in self.gCodeArray:	
+			if gcode.hasValue('G') and gcode.hasValue('F'):
 				# Get command's feedrate
 				commandFeedRate = float(gcode.getValue('F')) / 60
 				
 				# Force feed rate to adhere to limitations
-				if commandFeedRate > self.maxFeedRatePerSecond :
-                			commandFeedRate = self.maxFeedRatePerSecond
-                		
-                		# Calculate adjusted feed rate
-                		adjustedFeedRate = 30 + (1 - commandFeedRate / self.maxFeedRatePerSecond) * 800
-                		
+				if commandFeedRate > self.maxFeedRatePerSecond:
+					commandFeedRate = self.maxFeedRatePerSecond
+
+					# Calculate adjusted feed rate
+					adjustedFeedRate = 30 + (1 - commandFeedRate / self.maxFeedRatePerSecond) * 800
+
 				# Set new feed rate for the command
 				gcode.setValue('F', str(adjustedFeedRate))
-				
-				# Set line to adjusted value
-				line = gcode.getAscii() + '\n'
-			
-			# Send line to output
-			os.write(output, line)
-		
-		# Close output file
-		os.close(output)
-		
-		# Remove temporary file
-		os.remove(temp)
 
 # Plugin info
 __plugin_name__ = "M3D Fio"
